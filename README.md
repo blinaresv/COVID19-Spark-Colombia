@@ -1,11 +1,20 @@
 # Análisis de COVID-19 en Colombia con Apache Spark
 
-**Curso:** Herramientas y visualización de datos  
-**Institución:** Fundación Universitaria Los Libertadores  
-**Integrantes:**
-- Brandon Felipe Linares Viasus
-- Adriana Lucía Carreño Medina
-- Sariath Eyleen Xiomara Ariza Vargas
+**Curso:** Herramientas y visualización de datos
+**Institución:** Fundación Universitaria Los Libertadores
+**Integrantes:** Brandon Felipe Linares Viasus, Adriana Lucía Carreño Medina, Sariath Eyleen Xiomara Ariza Vargas
+
+---
+
+## Cómo llegamos a este proyecto (trazabilidad)
+
+Antes de escribir una sola línea de código tomamos tres decisiones, y conviene dejarlas escritas porque explican casi todo lo que vino después.
+
+Primero, el dataset. La actividad pide un archivo de más de 1 GB con columnas de varios tipos. Revisamos las fuentes permitidas y, dentro de Datos Abiertos Colombia, los únicos conjuntos que de verdad pasan el gigabyte son los de contratación pública (SECOP) y el de casos de COVID-19. Comparamos las dos opciones y nos quedamos con COVID-19 por una razón práctica: pesa 1.4 GB, trae fechas, una variable numérica y varias categóricas, y es un tema que cualquiera entiende sin explicación previa. Eso último pesa mucho en la sustentación.
+
+Segundo, las preguntas. En vez de hacer cinco gráficas sueltas, definimos cinco preguntas distintas y para cada una elegimos el tipo de gráfica que mejor la responde. Esa es la lógica que está detrás de la sección "Por qué cada gráfica".
+
+Tercero, el flujo de trabajo con Spark. Como el archivo no cabe cómodo en memoria, todo el trabajo pesado (agrupar, contar, filtrar) se hace en Spark y solo el resultado ya reducido pasa a Pandas para graficar. Nunca convertimos el dataset completo.
 
 ---
 
@@ -19,150 +28,109 @@
 | Registros | 6 390 971 filas cargadas / 6 390 957 tras limpieza |
 | Archivo | `Casos_positivos_COVID19_Colombia.csv` |
 
-Cada fila representa un caso confirmado e incluye: fecha de diagnóstico, fecha de notificación, edad, sexo, departamento, municipio, tipo de contagio, estado de gravedad y desenlace (recuperado o fallecido).
+Cada fila es un caso confirmado. Las columnas que usamos son la fecha de diagnóstico, la fecha de notificación, la edad, el sexo, el departamento, el municipio, el tipo de contagio, el estado de gravedad y el desenlace (recuperado o fallecido).
 
 ---
 
-## Tecnologías usadas
+## Tecnologías
 
-- **Apache Spark (PySpark)** — carga y procesamiento distribuido del dataset
-- **Pandas** — manejo de los resultados reducidos para graficar
-- **Matplotlib / Seaborn** — visualizaciones
-- **Jupyter Notebook** — entorno de desarrollo y presentación
+Apache Spark (PySpark) para cargar y procesar el dataset, Pandas para los resultados ya reducidos, Matplotlib y Seaborn para las gráficas, y Jupyter Notebook como entorno.
 
 ---
 
-## Proceso de limpieza de datos
+## Limpieza de datos
 
-Todas las transformaciones se hicieron en Spark sobre el DataFrame completo. Solo el resultado ya reducido (resultado de `.groupBy`, `.agg`, `.limit`, etc.) se pasó a Pandas con `.toPandas()`.
+Todo el proceso corre en Spark sobre el DataFrame completo. Solo el resultado de cada `groupBy`, `agg` o `limit` se convierte a Pandas con `.toPandas()`.
 
-### 1. Normalización de nombres de columnas
+**Nombres de columnas.** El CSV del portal a veces trae tildes, espacios y mayúsculas distintas según cuándo se descargue. Una función `norm()` les quita las tildes, los pasa a minúscula y reemplaza los espacios por guion bajo. Después un diccionario los lleva a nombres fijos (`fecha_notificacion`, `departamento`, etc.). Sin esto, el notebook se caería con un error de columna si cambia la versión del archivo. También elimina la columna de código del departamento cuando viene junto a la del nombre, para que no quede duplicada.
 
-El CSV del portal de Datos Abiertos puede traer encabezados con tildes, espacios y mayúsculas inconsistentes dependiendo de cuándo se descargó. Se aplicó la función `norm()` que:
+**Tipos de dato.** La edad llegaba como texto y la pasamos a entero. Las fechas también venían como texto y las convertimos con `to_date`, porque sin eso no podríamos agrupar por mes ni calcular rangos. Spark intenta adivinar los tipos al leer, pero con las fechas en formato colombiano no siempre acierta.
 
-- Elimina tildes y caracteres especiales (normalización Unicode NFKD)
-- Convierte todo a minúsculas
-- Reemplaza espacios y caracteres no alfanuméricos por guión bajo `_`
+**Texto categórico.** A `sexo`, `estado`, `recuperado`, `tipo_contagio` y `departamento` les aplicamos `trim` y `upper`. Así "Recuperado", "recuperado" y " RECUPERADO " dejan de contarse como tres categorías diferentes.
 
-Luego se aplicó un diccionario de equivalencias para asignar nombres canónicos fijos (`fecha_notificacion`, `departamento`, `municipio`, `tipo_contagio`, etc.), garantizando que el notebook funcione sin importar la versión del CSV descargado.
+**Sexo.** Dejamos solo M y F. Cualquier otro valor pasa a nulo.
 
-**Por qué:** sin esto el notebook fallaría con `AnalysisException` si los encabezados cambian entre versiones del archivo.
+**Edades imposibles.** Quitamos los registros con edad menor que 0 o mayor que 110. Valores como -1 o 999 son errores de captura, y 0 a 110 cubre cualquier edad real.
 
----
+**Duplicados.** `dropDuplicates()` sobre todo el DataFrame, porque en las descargas del portal pueden colarse filas repetidas.
 
-### 2. Conversión de tipos
+**Nulos.** No los imputamos. Columnas como `fecha_muerte` están vacías a propósito en los casos que no fallecieron, así que rellenarlas no tendría sentido, y borrar toda fila con algún nulo nos dejaría casi sin datos. En su lugar, cada gráfica filtra los nulos solo de las columnas que necesita.
 
-| Columna | Tipo original | Tipo final | Motivo |
-|---|---|---|---|
-| `edad` | String | Integer | Permitir filtros numéricos y rangos |
-| `fecha_notificacion` | String | Date | Agrupar por mes/año en la serie temporal |
-| `fecha_diagnostico` | String | Date | Ídem, columna preferida para la serie |
-| `fecha_muerte` | String | Date | Consistencia, aunque tiene muchos nulos |
-
-**Por qué:** Spark infiere tipos al leer el CSV pero no siempre acierta con las fechas en formato colombiano. `to_date` convierte con el formato correcto.
+El resultado: de 6 390 971 filas quedaron 6 390 957 (se fueron 14 por edades fuera de rango). El DataFrame limpio queda en `df_clean` con `.cache()` para que las consultas siguientes sean rápidas.
 
 ---
 
-### 3. Estandarización de texto en columnas categóricas
+## Por qué cada gráfica: tipo, datos y color
 
-A las columnas `sexo`, `estado`, `recuperado`, `tipo_contagio` y `departamento` se les aplicó:
-- `F.trim()` — elimina espacios al inicio y al final
-- `F.upper()` — convierte todo a mayúsculas
+Esta es la parte que sustenta las decisiones de visualización. Para cada una explicamos tres cosas: por qué ese tipo de gráfica, qué datos la alimentan y por qué ese color.
 
-**Por qué:** un mismo valor como `"Recuperado"`, `"recuperado"` y `" RECUPERADO "` se tratarían como tres categorías distintas al agrupar.
+### 1. Línea — evolución de los casos en el tiempo
 
----
+Elegimos una línea porque los datos tienen un orden natural: los meses van uno tras otro. La línea conecta esos puntos y deja ver de un vistazo las subidas y bajadas, que aquí son las olas de contagio. Un gráfico de barras no comunicaría igual de bien la idea de continuidad.
 
-### 4. Unificación de valores de sexo
+Los datos salen de agrupar la fecha de diagnóstico por mes y contar los casos de cada uno. Usamos la fecha de diagnóstico porque marca cuándo se confirmó el caso. Son solo dos series: el mes y el número de casos.
 
-La columna `sexo` solo admite dos valores válidos: `M` (masculino) y `F` (femenino). Cualquier otro valor (por ejemplo `"NO REPORTADO"`, `"INDETERMINADO"` o nulo) se reemplazó por `null`.
+El color es un azul en una sola tonalidad (paleta secuencial Blues). Como hay una sola magnitud que avanza en el tiempo y no hay categorías que separar, un único tono es lo correcto; meter varios colores daría a entender que hay grupos distintos, y no los hay.
 
-**Por qué:** evitar que categorías residuales contaminen análisis de género si se añade en el futuro.
+### 2. Barras horizontales — departamentos con más casos
 
----
+Las barras sirven para comparar cantidades entre categorías, que aquí son los departamentos. Las pusimos horizontales para que los nombres largos se lean sin girar la cabeza. Dejamos solo el top 10 porque con más de quince categorías una barra se vuelve ilegible.
 
-### 5. Filtrado de edades fuera de rango
+Los datos vienen de agrupar por departamento, contar los casos y quedarnos con los diez más altos. Una columna categórica (departamento) y su conteo.
 
-Se eliminaron todos los registros con `edad < 0` o `edad > 110`.
+El color es otra vez un azul secuencial, el mismo tono en todas las barras. Todas miden lo mismo (número de casos), así que un solo color mantiene la lectura limpia. Usar un color por barra insinuaría que cada departamento es una categoría sin relación con las demás, cuando en realidad solo estamos ordenando por magnitud.
 
-**Por qué:** valores como `-1`, `999` o `9999` son errores de captura evidentes. El rango 0–110 cubre cualquier edad biológicamente posible.
+### 3. Histograma — distribución de la edad
 
----
+La edad es una variable continua y lo que queremos saber es cómo se reparte: en qué edades se concentran los casos. Para eso el histograma es el gráfico indicado. Agrupamos las edades en rangos de cinco años para que la forma se vea clara sin tanto ruido.
 
-### 6. Eliminación de duplicados
+Los datos salen de partir la edad en esos rangos y contar cuántos casos caen en cada uno. Una sola variable numérica. El eje Y arranca en cero, como debe ser en un histograma, para no exagerar las diferencias.
 
-Se llamó a `dropDuplicates()` sobre el DataFrame completo para eliminar filas idénticas.
+El color es un verde secuencial de un solo tono, por la misma razón que en los casos anteriores: una sola magnitud, sin categorías que distinguir.
 
-**Por qué:** en datasets descargados del portal público pueden aparecer registros repetidos por carga incremental o errores del sistema fuente.
+### 4. Mapa de calor — edad frente a gravedad
 
----
+Aquí cruzamos dos variables categóricas, el grupo de edad y el estado de gravedad, y queremos ver qué tan llena está cada combinación. El mapa de calor hace justo eso: cada celda es un cruce y su color indica cuántos casos hay. La matriz queda de cinco filas por cuatro columnas, tamaño de sobra para que el formato tenga sentido.
 
-### 7. Tratamiento de nulos — decisión explícita de NO imputar
+Los datos vienen de un pivote: las filas son los grupos de edad (0-17, 18-39, 40-59, 60-79, 80+) y las columnas los estados de gravedad, con el conteo en cada celda.
 
-Las columnas `fecha_muerte` y las relacionadas con datos de viaje tienen una alta proporción de nulos **por diseño**: `fecha_muerte` solo aplica a casos fallecidos y los datos de viaje solo a casos importados. Se decidió **no imputar** estos nulos.
+El color es la paleta secuencial viridis, no una divergente. Esto es a propósito: son conteos, todos positivos, sin un punto medio con significado especial. La paleta divergente solo tendría sentido si midiéramos algo con centro en cero, como una correlación, que no es el caso.
 
-En cada visualización se filtran los nulos únicamente de las columnas que esa gráfica necesita, con `filter(col(...).isNotNull())`.
+### 5. Diagrama de caja — edad según el resultado del caso
 
-**Por qué:** imputar una fecha de muerte para un caso recuperado no tiene sentido. Eliminar todas las filas con algún nulo habría descartado la gran mayoría del dataset.
+Queremos comparar la edad entre dos grupos: quienes se recuperaron y quienes fallecieron. El boxplot es ideal para eso porque muestra la mediana, el rango donde está la mayoría y los valores atípicos de cada grupo, lado a lado.
 
----
+Para no traer millones de filas a Pandas, filtramos en Spark los casos recuperados y fallecidos, tomamos solo la edad y sacamos una muestra del 5 %. La muestra es suficiente para dibujar la distribución y mantiene el principio de reducir antes de convertir.
 
-### Resultado de la limpieza
+El color usa una paleta cualitativa (ColorBrewer Set2) con dos tonos distintos, uno por grupo. Aquí sí corresponden colores diferentes porque recuperado y fallecido son dos categorías sin orden entre sí, y el color ayuda a separarlas de un vistazo.
 
-```
-Registros cargados:              6 390 971
-Registros después de limpieza:   6 390 957  (14 eliminados por edades fuera de rango)
-```
+### Estilo común a las cinco
 
-El DataFrame limpio se almacena en `df_clean` y se guarda en caché con `.cache()` para acelerar las consultas sucesivas.
-
----
-
-## Visualizaciones
-
-| # | Tipo | Variable analizada | Pregunta que responde |
-|---|---|---|---|
-| 1 | Líneas | Casos por mes | ¿Cómo evolucionaron los contagios en el tiempo? |
-| 2 | Barras horizontales | Top 10 departamentos | ¿Qué departamentos concentraron más casos? |
-| 3 | Histograma | Distribución de edad | ¿Qué edades fueron más afectadas? |
-| 4 | Mapa de calor | Grupo de edad × estado de gravedad | ¿Cómo se relacionan la edad y la gravedad? |
-| 5 | Boxplot | Edad por desenlace (recuperado vs. fallecido) | ¿Difiere la edad según el desenlace? |
-
-### Criterios de estilo aplicados a todas las gráficas
-
-- Título descriptivo en **negrita 12pt**
-- Ejes etiquetados con unidades
-- Sin bordes superior ni derecho (`spines` ocultos)
-- Eje Y desde cero
-- Paleta **secuencial** (Blues, Greens, Viridis) para conteos y series ordenadas
-- Paleta **cualitativa** (ColorBrewer Set2) para el boxplot con dos categorías
-- Sin colores por defecto de Matplotlib
+Todas llevan título descriptivo en negrita de 12 puntos, ejes etiquetados con sus unidades, los bordes superior y derecho ocultos, y un grid horizontal suave en barras e histograma. Ninguna usa los colores por defecto de Matplotlib ni combinaciones de rojo y verde, que dan problemas a quienes tienen daltonismo.
 
 ---
 
 ## Hallazgos principales
 
-| Visualización | Hallazgo clave |
+| Visualización | Hallazgo |
 |---|---|
-| Evolución temporal | Pico en **junio 2021** con 859 087 casos; segunda ola en **enero 2022** (Ómicron, 752 234) |
-| Top departamentos | **Bogotá** lidera con 1 888 134 casos (~30 % del total); le siguen Antioquia (955 268) y Valle (572 721) |
-| Distribución de edad | Rango más afectado: **25–29 años** (743 670 casos); el tramo 20–44 años concentra más del 40 % |
-| Edad vs. gravedad | Estado Leve domina en todos los grupos; Fallecido se concentra en **60–79** y **80+** |
-| Desenlace por edad | Mediana recuperados: **37 años** · Mediana fallecidos: **70 años** · Brecha: **33 años** |
+| Evolución temporal | Pico en junio de 2021 con 859 087 casos; segunda ola fuerte en enero de 2022 (Ómicron, 752 234) |
+| Top departamentos | Bogotá encabeza con 1 888 134 casos (cerca del 30 % del total), seguida de Antioquia (955 268) y Valle (572 721) |
+| Distribución de edad | El rango más afectado es 25-29 años (743 670 casos); el tramo de 20 a 44 reúne más del 40 % |
+| Edad y gravedad | El estado leve domina en todos los grupos; los fallecidos se concentran en 60-79 y 80+ |
+| Edad y desenlace | Mediana de recuperados: 37 años. Mediana de fallecidos: 70 años. Una diferencia de 33 años |
 
 ---
 
 ## Cómo ejecutar
 
-1. Asegúrate de tener Java 17 o superior instalado y la variable `JAVA_HOME` configurada.
-   - Mac: `brew install openjdk@21` (versión usada: OpenJDK 21)
-   - Windows: descargar Temurin 17 de adoptium.net
-2. Coloca el archivo `Casos_positivos_COVID19_Colombia.csv` en esta misma carpeta.
+1. Instala Java 17 o superior y configura `JAVA_HOME`. En Mac, `brew install openjdk@21`; en Windows, descarga Temurin 17 de adoptium.net.
+2. Deja el archivo `Casos_positivos_COVID19_Colombia.csv` en esta misma carpeta.
 3. Abre `Linares_Carreno_Ariza_HVD_Spark.ipynb` en VS Code o Jupyter.
-4. Ejecuta todas las celdas en orden (**Run All**).
-5. La sesión de Spark se cierra automáticamente al final con `spark.stop()`.
+4. Ejecuta todas las celdas en orden con Run All.
+5. La sesión de Spark se cierra sola al final con `spark.stop()`.
 
-### Configuración de Spark utilizada
+Configuración de Spark que usamos:
 
 ```python
 SparkSession.builder
@@ -171,10 +139,10 @@ SparkSession.builder
     .config('spark.sql.shuffle.partitions', '64')
 ```
 
-Si el equipo tiene menos de 8 GB de RAM disponible, reducir `spark.driver.memory` a `'2g'` y aumentar los filtros previos a las agregaciones.
+Si el equipo tiene menos de 8 GB de RAM, baja `spark.driver.memory` a `'2g'` y filtra más antes de cada agregación.
 
 ---
 
 ## Archivo a entregar
 
-`Linares_Carreno_Ariza_HVD_Spark.ipynb` — con todas las celdas ejecutadas y los resultados visibles.
+`Linares_Carreno_Ariza_HVD_Spark.ipynb`, con todas las celdas ejecutadas y los resultados a la vista. El dataset no va en el repositorio porque pesa 1.4 GB; se descarga del enlace del INS en Datos Abiertos Colombia.

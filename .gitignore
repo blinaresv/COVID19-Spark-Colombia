@@ -1,1 +1,8 @@
+# El dataset es demasiado grande para GitHub (1.4 GB, límite de 100 MB)
 *.csv
+
+# Archivos del sistema y temporales
+.DS_Store
+.ipynb_checkpoints/
+__pycache__/
+spark-warehouse/
